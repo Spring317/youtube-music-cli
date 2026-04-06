@@ -6,10 +6,13 @@
 ╚═══════════════════════════════════════════╝
 """
 
+import json
+import os
 import re
 import subprocess
 import sys
 import time
+from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 import yt_dlp
@@ -41,7 +44,7 @@ def c(text: str, colour: str, bold: bool = False) -> str:
 def header():
     print(c("""
 ╔══════════════════════════════════════════════════╗
-║   🎵   YouTube Music CLI Player  v2.0   🎵      ║
+║   🎵   YouTube Music CLI Player  v2.1   🎵      ║
 ║        Powered by ytmusicapi + yt-dlp            ║
 ╚══════════════════════════════════════════════════╝""", CYAN, bold=True))
 
@@ -59,6 +62,19 @@ def error(msg: str) -> None:
 
 def info(msg: str) -> None:
     print(c(f"  ℹ  {msg}", CYAN))
+
+
+# ─────────────────────────────────────────────────────────────
+#  Storage paths
+# ─────────────────────────────────────────────────────────────
+
+SAVE_DIR    = Path.home() / ".ytmusic_cli" / "saved"   # JSON tokens
+OFFLINE_DIR = Path.home() / "Music" / "ytmusic"        # downloaded audio
+
+
+def ensure_dirs() -> None:
+    SAVE_DIR.mkdir(parents=True, exist_ok=True)
+    OFFLINE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -168,6 +184,29 @@ def play_track(video_id: str, title: str, artists: str, track_num: int | None = 
     try:
         subprocess.run(
             ["mpv", "--no-video", "--really-quiet", stream],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except KeyboardInterrupt:
+        print(c("\n  ⏭  Skipped.", YELLOW))
+    except FileNotFoundError:
+        error("'mpv' not found. Install it with: sudo apt install mpv  (or brew install mpv)")
+        sys.exit(1)
+
+
+def play_local_file(filepath: str, title: str, artists: str, track_num: int | None = None, total: int | None = None) -> None:
+    """Play a locally downloaded audio file through mpv."""
+    prefix = f"[{track_num}/{total}] " if track_num and total else ""
+    print()
+    divider()
+    print(c(f"  ▶  {prefix}{title}", GREEN, bold=True))
+    print(c(f"       by {artists}", GREY))
+    print(c(f"       💾 Offline", DIM + CYAN))
+    divider()
+    print(c("  🎵 Playing! Press Ctrl+C to skip / stop.", YELLOW))
+    try:
+        subprocess.run(
+            ["mpv", "--no-video", "--really-quiet", filepath],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -312,7 +351,7 @@ def play_album_by_browse_id(ytm: YTMusic, browse_id: str, album_title: str = "")
         )
 
     divider()
-    print(c("  [A] Play all   [P] Pick a track   [0] Back", CYAN))
+    print(c("  [A] Play all   [P] Pick a track   [S] Save   [D] Download offline   [0] Back", CYAN))
     choice = input(c("\n  Your choice: ", MAGENTA, bold=True)).strip().upper()
 
     if choice == "0" or choice == "":
@@ -360,6 +399,24 @@ def play_album_by_browse_id(ytm: YTMusic, browse_id: str, album_title: str = "")
             return
         _, t = available[picked]
         play_track(t["videoId"], t.get("title","?"), _fmt_artists(t.get("artists")))
+
+    elif choice == "S":
+        save_token(
+            kind="album",
+            title=title,
+            author=artist,
+            browse_id=browse_id,
+            tracks=tracks,
+        )
+
+    elif choice == "D":
+        download_offline(
+            kind="album",
+            title=title,
+            author=artist,
+            browse_id=browse_id,
+            tracks=tracks,
+        )
 
 
 def feature_search_album(ytm: YTMusic) -> None:
@@ -434,7 +491,7 @@ def play_playlist_from_id(ytm: YTMusic, playlist_id: str, name: str = "") -> Non
         )
 
     divider()
-    print(c("  [A] Play all   [P] Pick a track   [0] Back", CYAN))
+    print(c("  [A] Play all   [P] Pick a track   [S] Save   [D] Download offline   [0] Back", CYAN))
     choice = input(c("\n  Your choice: ", MAGENTA, bold=True)).strip().upper()
 
     if choice == "0" or choice == "":
@@ -476,6 +533,24 @@ def play_playlist_from_id(ytm: YTMusic, playlist_id: str, name: str = "") -> Non
             return
         _, t = available[picked]
         play_track(t["videoId"], t.get("title","?"), _fmt_artists(t.get("artists")))
+
+    elif choice == "S":
+        save_token(
+            kind="playlist",
+            title=pl_title,
+            author=pl_author,
+            playlist_id=playlist_id,
+            tracks=tracks,
+        )
+
+    elif choice == "D":
+        download_offline(
+            kind="playlist",
+            title=pl_title,
+            author=pl_author,
+            playlist_id=playlist_id,
+            tracks=tracks,
+        )
 
 
 def feature_play_from_url(ytm: YTMusic) -> None:
@@ -556,6 +631,327 @@ def feature_search_playlist(ytm: YTMusic) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
+#  Save / Library helpers
+# ─────────────────────────────────────────────────────────────
+
+def _safe_filename(name: str) -> str:
+    """Turn a title into a safe directory/file name."""
+    return re.sub(r"[^\w\-. ]", "_", name).strip().replace(" ", "_")
+
+
+def save_token(kind: str, title: str, author: str, tracks: list, browse_id: str = "", playlist_id: str = "") -> None:
+    """
+    Save playlist/album metadata as a JSON 'token' for quick re-play.
+    No audio is downloaded – just store track IDs and metadata.
+    """
+    ensure_dirs()
+
+    # Normalise track list to a consistent format
+    token_tracks = []
+    for t in tracks:
+        vid = t.get("videoId")
+        if vid:
+            token_tracks.append({
+                "videoId": vid,
+                "title":   t.get("title", "?"),
+                "artists": _fmt_artists(t.get("artists")),
+                "duration": t.get("duration", ""),
+                "isAvailable": t.get("isAvailable", True),
+            })
+
+    token = {
+        "kind":       kind,          # "album" | "playlist"
+        "title":      title,
+        "author":     author,
+        "browseId":   browse_id,
+        "playlistId": playlist_id,
+        "savedAt":    time.strftime("%Y-%m-%d %H:%M"),
+        "tracks":     token_tracks,
+    }
+
+    filename = _safe_filename(f"{kind}_{title}") + ".json"
+    path = SAVE_DIR / filename
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(token, f, ensure_ascii=False, indent=2)
+
+    success(f"Saved token → {path}")
+    info(f"  {len(token_tracks)} tracks stored. Re-play from 'My Library' (no internet needed for metadata).")
+
+
+def download_offline(kind: str, title: str, author: str, tracks: list, browse_id: str = "", playlist_id: str = "") -> None:
+    """
+    Download all available tracks as audio files (best quality MP3-like)
+    using yt-dlp, and save a token so the library knows about them.
+    """
+    ensure_dirs()
+
+    available = [t for t in tracks if t.get("videoId") and t.get("isAvailable", True)]
+    if not available:
+        warn("No downloadable tracks found.")
+        return
+
+    folder_name = _safe_filename(f"{kind}_{title}")
+    dest_dir = OFFLINE_DIR / folder_name
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    print()
+    divider("═")
+    print(c(f"  💾  Downloading offline: {title}", MAGENTA, bold=True))
+    print(c(f"       {len(available)} tracks → {dest_dir}", GREY))
+    divider("═")
+
+    downloaded_tracks = []
+    for i, t in enumerate(available, 1):
+        vid      = t["videoId"]
+        t_title  = t.get("title", "?")
+        t_artist = _fmt_artists(t.get("artists"))
+        safe_name = _safe_filename(f"{i:02d}_{t_title}")
+        out_template = str(dest_dir / f"{safe_name}.%(ext)s")
+
+        print(c(f"\n  [{i}/{len(available)}] Downloading: {t_title}…", CYAN))
+
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": out_template,
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }],
+        }
+
+        url = f"https://www.youtube.com/watch?v={vid}"
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+            # Find the downloaded file
+            matches = list(dest_dir.glob(f"{safe_name}.*"))
+            local_path = str(matches[0]) if matches else ""
+            downloaded_tracks.append({
+                "videoId":   vid,
+                "title":     t_title,
+                "artists":   t_artist,
+                "duration":  t.get("duration", ""),
+                "localFile": local_path,
+            })
+            success(f"  ✔  {t_title}")
+        except KeyboardInterrupt:
+            warn("Download interrupted by user.")
+            break
+        except Exception as exc:
+            error(f"  Failed to download '{t_title}': {exc}")
+
+    # Save a token that points to local files
+    token = {
+        "kind":       kind,
+        "title":      title,
+        "author":     author,
+        "browseId":   browse_id,
+        "playlistId": playlist_id,
+        "savedAt":    time.strftime("%Y-%m-%d %H:%M"),
+        "offline":    True,
+        "localDir":   str(dest_dir),
+        "tracks":     downloaded_tracks,
+    }
+
+    token_path = SAVE_DIR / (_safe_filename(f"offline_{kind}_{title}") + ".json")
+    with open(token_path, "w", encoding="utf-8") as f:
+        json.dump(token, f, ensure_ascii=False, indent=2)
+
+    print()
+    divider()
+    success(f"Downloaded {len(downloaded_tracks)}/{len(available)} tracks.")
+    success(f"Files saved to: {dest_dir}")
+    success(f"Token saved to: {token_path}")
+    info("You can play them offline from 'My Library' → Offline.")
+
+
+# ─────────────────────────────────────────────────────────────
+#  Feature 5 – My Library (saved tokens + offline)
+# ─────────────────────────────────────────────────────────────
+
+def _load_tokens() -> list[dict]:
+    """Load all saved token JSON files from SAVE_DIR."""
+    ensure_dirs()
+    tokens = []
+    for path in sorted(SAVE_DIR.glob("*.json")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+                data["_path"] = str(path)
+                tokens.append(data)
+        except Exception:
+            pass
+    return tokens
+
+
+def _play_token(token: dict) -> None:
+    """Play the tracks stored in a saved token (streaming or local files)."""
+    title    = token.get("title", "?")
+    author   = token.get("author", "?")
+    is_offline = token.get("offline", False)
+    tracks   = token.get("tracks", [])
+
+    if not tracks:
+        warn("No tracks in this saved item.")
+        return
+
+    print()
+    divider("═")
+    icon = "💾" if is_offline else "🔖"
+    print(c(f"  {icon}  {title}", MAGENTA, bold=True))
+    print(c(f"       by {author}", GREY))
+    mode = c("  Offline 💾", DIM + GREEN) if is_offline else c("  Streaming 🌐", DIM + CYAN)
+    print(mode)
+    print(c(f"       {len(tracks)} tracks", DIM + CYAN))
+    divider("═")
+
+    for i, t in enumerate(tracks, 1):
+        t_title  = t.get("title", "?")
+        t_artist = t.get("artists", "?")
+        dur      = t.get("duration", "")
+        avail    = t.get("isAvailable", True)
+        avail_str = "" if avail else c(" [unavailable]", RED)
+        local    = t.get("localFile", "")
+        local_str = c(" 💾", DIM + GREEN) if local and Path(local).exists() else ""
+        print(
+            c(f"  {i:>2}.", DIM + GREY)
+            + f" {c(t_title, WHITE)}"
+            + c(f" – {t_artist}", GREY)
+            + c(f"  {dur}", DIM + GREY)
+            + avail_str
+            + local_str
+        )
+
+    divider()
+    print(c("  [A] Play all   [P] Pick a track   [X] Delete saved   [0] Back", CYAN))
+    choice = input(c("\n  Your choice: ", MAGENTA, bold=True)).strip().upper()
+
+    if choice == "0" or choice == "":
+        return
+
+    if choice == "A":
+        print(c(f"\n  ▶▶  Playing: {title}", GREEN, bold=True))
+        for i, t in enumerate(tracks, 1):
+            vid     = t.get("videoId")
+            t_title = t.get("title", "?")
+            t_art   = t.get("artists", "?")
+            local   = t.get("localFile", "")
+
+            if local and Path(local).exists():
+                try:
+                    play_local_file(local, t_title, t_art, track_num=i, total=len(tracks))
+                except KeyboardInterrupt:
+                    print(c("\n  ⏹  Playback stopped.", YELLOW))
+                    return
+            elif vid:
+                try:
+                    play_track(vid, t_title, t_art, track_num=i, total=len(tracks))
+                except KeyboardInterrupt:
+                    print(c("\n  ⏹  Playback stopped.", YELLOW))
+                    return
+            else:
+                warn(f"Track {i} has no video ID and no local file, skipping.")
+        success(f"Finished: {title}")
+
+    elif choice == "P":
+        available = [
+            (i, t) for i, t in enumerate(tracks, 1)
+            if t.get("videoId") or (t.get("localFile") and Path(t.get("localFile","")).exists())
+        ]
+        if not available:
+            warn("No playable tracks found.")
+            return
+
+        def label(item):
+            i, t = item
+            local = t.get("localFile", "")
+            offline_mark = c(" 💾", DIM + GREEN) if local and Path(local).exists() else ""
+            return (
+                c(f"{i:>2}.", DIM + GREY)
+                + f" {c(t.get('title','?'), WHITE)}"
+                + c(f" – {t.get('artists','?')}", GREY)
+                + offline_mark
+            )
+
+        picked = _pick("Pick a track", available, label)
+        if picked is None:
+            return
+        _, t = available[picked]
+        local = t.get("localFile", "")
+        if local and Path(local).exists():
+            play_local_file(local, t.get("title","?"), t.get("artists","?"))
+        elif t.get("videoId"):
+            play_track(t["videoId"], t.get("title","?"), t.get("artists","?"))
+        else:
+            error("No playable source for this track.")
+
+    elif choice == "X":
+        path = token.get("_path", "")
+        if path and Path(path).exists():
+            confirm = input(c(f"\n  Delete '{title}'? [y/N]: ", RED, bold=True)).strip().lower()
+            if confirm == "y":
+                Path(path).unlink()
+                success(f"Deleted: {path}")
+                info("Note: downloaded audio files (if any) are NOT deleted.")
+            else:
+                info("Cancelled.")
+        else:
+            error("Token file not found.")
+
+
+def feature_my_library(_ytm: YTMusic) -> None:
+    """Show saved playlists/albums (tokens) and let the user play them."""
+    tokens = _load_tokens()
+
+    if not tokens:
+        print()
+        divider()
+        print(c("  📚  My Library", BOLD + WHITE))
+        divider(char="·")
+        warn("No saved items yet.")
+        info("Save an album or playlist by pressing [S] or [D] when viewing one.")
+        divider()
+        return
+
+    while True:
+        print()
+        divider("═")
+        print(c("  📚  My Library", BOLD + WHITE))
+        divider(char="·")
+
+        # Reload tokens each loop in case something was deleted
+        tokens = _load_tokens()
+        if not tokens:
+            warn("Library is now empty.")
+            return
+
+        def label(tok):
+            kind    = tok.get("kind", "?")
+            title   = tok.get("title", "?")
+            author  = tok.get("author", "?")
+            n       = len(tok.get("tracks", []))
+            saved   = tok.get("savedAt", "")
+            offline = "  💾 Offline" if tok.get("offline") else "  🌐 Token"
+            icon    = "💿" if kind == "album" else "📋"
+            return (
+                f"{icon}  {c(title, WHITE, bold=True)}"
+                + c(f" by {author}", GREY)
+                + c(f"  {n} tracks", DIM + CYAN)
+                + c(offline, DIM + GREEN if tok.get("offline") else DIM + CYAN)
+                + c(f"  {saved}", DIM + GREY)
+            )
+
+        idx = _pick("Pick an item to play", tokens, label)
+        if idx is None:
+            return
+        _play_token(tokens[idx])
+
+
+# ─────────────────────────────────────────────────────────────
 #  Main menu
 # ─────────────────────────────────────────────────────────────
 
@@ -564,6 +960,7 @@ MENU = [
     ("💿", "Search & play an Album",          feature_search_album),
     ("📋", "Search & play a Playlist",        feature_search_playlist),
     ("🔗", "Play from a URL (album/playlist)", feature_play_from_url),
+    ("📚", "My Library  (saved / offline)",   feature_my_library),
 ]
 
 
