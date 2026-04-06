@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "climusic"
 version = "0.1.0"
-description = "A minimalist terminal YouTube Music player."
+description = "A feature-rich terminal YouTube Music player."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -14,5 +14,5 @@ dependencies = [
 ]
 
 [project.scripts]
-# This creates the terminal command 'climusic'
-climusic = "climusic.main:main"
+# This creates the terminal command 'ytmusic'
+ytmusic = "yt_music_cli.main:main"
