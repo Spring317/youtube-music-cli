@@ -14,6 +14,10 @@ MP3_QUALITY: str = "192"
 SAVE_DIR: Path = Path.home() / ".ytmusic_cli" / "saved"
 OFFLINE_DIR: Path = Path.home() / "Music" / "ytmusic"
 
+# Optional Netscape-format cookies file for yt-dlp authentication.
+# Export from your browser with a "Get cookies.txt" extension and place here.
+COOKIES_FILE: Path = Path.home() / ".ytmusic_cli" / "cookies.txt"
+
 
 def ensure_dirs() -> None:
     """Create required storage directories if they don't already exist."""

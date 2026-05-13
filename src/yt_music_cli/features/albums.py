@@ -23,27 +23,15 @@ from ..library import save_token, download_offline
 # ── Shared playback helpers ───────────────────────────────────────────────────
 
 def _play_all(tracks: list[dict], title: str) -> None:
-    print(c(f"\n  ▶▶  Playing full album: {title}", GREEN, bold=True))
+    from ..player import play_playlist
+    available_tracks = []
     for i, t in enumerate(tracks, 1):
         if not t.get("isAvailable", True):
             warn(f"Track {i} ({t.get('title', '?')}) unavailable, skipping.")
-            continue
-        vid = t.get("videoId")
-        if not vid:
-            warn(f"Track {i} has no video ID, skipping.")
-            continue
-        try:
-            play_track(
-                vid,
-                t.get("title", "?"),
-                fmt_artists(t.get("artists")),
-                track_num=i,
-                total=len(tracks),
-            )
-        except KeyboardInterrupt:
-            print(c("\n  ⏹  Album playback stopped.", YELLOW))
-            return
-    success("Album finished!")
+        else:
+            available_tracks.append(t)
+            
+    play_playlist(available_tracks, title)
 
 
 def _pick_track(tracks: list[dict]) -> None:

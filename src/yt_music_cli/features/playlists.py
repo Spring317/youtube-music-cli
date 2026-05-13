@@ -22,24 +22,8 @@ from ..library import save_token, download_offline
 # ── Private helpers ───────────────────────────────────────────────────────────
 
 def _play_all(tracks: list[dict], title: str) -> None:
-    print(c(f"\n  ▶▶  Playing full playlist: {title}", GREEN, bold=True))
-    for i, t in enumerate(tracks, 1):
-        vid = t.get("videoId")
-        if not vid:
-            warn(f"Track {i} has no video ID, skipping.")
-            continue
-        try:
-            play_track(
-                vid,
-                t.get("title", "?"),
-                fmt_artists(t.get("artists")),
-                track_num=i,
-                total=len(tracks),
-            )
-        except KeyboardInterrupt:
-            print(c("\n  ⏹  Playlist playback stopped.", YELLOW))
-            return
-    success("Playlist finished!")
+    from ..player import play_playlist
+    play_playlist(tracks, title)
 
 
 def _pick_track(tracks: list[dict]) -> None:
